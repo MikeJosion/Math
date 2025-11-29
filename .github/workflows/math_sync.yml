@@ -2,8 +2,8 @@ name: Sync Math Notes
 
 on:
   schedule:
-    - cron: '0 */1 * * *' # 每小时运行一次
-  workflow_dispatch:      # 允许手动点按钮运行
+    - cron: '0 */12 * * *'  # 👈 改成这就行 (意思：每12小时运行一次)
+  workflow_dispatch:       # 允许手动点按钮运行
 
 permissions:
   contents: write         # 允许写入仓库
