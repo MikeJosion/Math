@@ -46,6 +46,50 @@ def richtext_to_plain(rich_text_list):
         text_content += plain
     return text_content
 
+def get_table_markdown(block_id):
+    """
+    ✅ 新增函数：专门处理 Table Block
+    需要再次调用 API 获取表格的所有行 (children)
+    """
+    try:
+        # 获取表格的所有子行
+        response = notion.blocks.children.list(block_id=block_id)
+        rows = response.get("results", [])
+        
+        md_lines = []
+        
+        for index, row in enumerate(rows):
+            if row['type'] != 'table_row':
+                continue
+            
+            cells = row['table_row']['cells']
+            cell_texts = []
+            
+            # 遍历每一个单元格
+            for cell in cells:
+                # 复用 richtext_to_plain，这样表格里的加粗、公式($A$)都能保留
+                text = richtext_to_plain(cell)
+                # 处理换行：表格内换行必须转为 <br> 或空格，否则破坏 Markdown 结构
+                text = text.replace("\n", "<br>")
+                cell_texts.append(text)
+            
+            # 拼接一行: | col1 | col2 |
+            md_row = "| " + " | ".join(cell_texts) + " |"
+            md_lines.append(md_row)
+            
+            # 如果是第一行，添加表头分割线 |---|---|
+            if index == 0:
+                separators = ["---"] * len(cell_texts)
+                md_sep = "| " + " | ".join(separators) + " |"
+                md_lines.append(md_sep)
+                
+        # 表格前后多加换行，防止和周围文本挤在一起
+        return "\n" + "\n".join(md_lines) + "\n\n"
+        
+    except Exception as e:
+        print(f"⚠️ 获取表格内容失败: {e}")
+        return ""
+
 def block_to_markdown(block):
     """把 Notion 的 Block 转换为 Markdown 字符串"""
     b_type = block["type"]
@@ -91,7 +135,7 @@ def block_to_markdown(block):
         elif b_type == "callout":
             icon = block["callout"].get("icon", {}).get("emoji", "💡")
             content = f"> {icon} **{text}**\n\n"
-
+        
         # --- 图片 ---
         elif b_type == "image":
             url = block["image"].get("file", {}).get("url") or block["image"].get("external", {}).get("url")
@@ -101,8 +145,15 @@ def block_to_markdown(block):
         elif b_type == "divider":
             content = "---\n\n"
 
+        # --- ✅ 新增：表格 (Table) ---
+        elif b_type == "table":
+            # 调用上面新写的函数处理表格
+            content = get_table_markdown(block["id"])
+
         # 递归处理子 Block (例如列表下的缩进内容)
-        if block.get("has_children"):
+        # 注意：table 也有 children，但已经在上面处理过了，
+        # 为了避免重复，我们可以简单地让表格不进入下面的递归，或者因为 table_row 没有对应处理逻辑而返回空，所以这里不改也没事。
+        if block.get("has_children") and b_type != "table":
             children = notion.blocks.children.list(block["id"]).get("results", [])
             for child in children:
                 # 给子内容增加缩进 (简单处理)
@@ -127,8 +178,6 @@ def sync():
     
     try:
         # 查询数据库
-        # 这里为了保险，暂时不加 filter，把所有笔记都抓下来
-        # 如果你想只抓 'Done' 的，可以在这里加 filter 参数
         response = notion.databases.query(database_id=DATABASE_ID)
         pages = response.get("results", [])
     except Exception as e:
@@ -142,7 +191,6 @@ def sync():
         props = page["properties"]
         
         # --- A. 获取标题 (Name) ---
-        # 注意：你的表格第一列名字叫 "Name"
         title_obj = props.get("Name", {}).get("title", [])
         if not title_obj:
             print("⚠️ 跳过无标题页面")
@@ -150,19 +198,17 @@ def sync():
         title = title_obj[0]["plain_text"]
         
         # --- B. 获取分类 (Category) ---
-        # 注意：你的分类列名字叫 "Category"
         category = "Uncategorized" # 默认分类
         cat_prop = props.get("Category", {}).get("select") or props.get("Category", {}).get("multi_select")
         
         # 兼容单选(Select)和多选(Multi-select)
         if cat_prop:
             if isinstance(cat_prop, list) and len(cat_prop) > 0:
-                 category = cat_prop[0]["name"] # 如果是多选，取第一个
+                 category = cat_prop[0]["name"] 
             elif isinstance(cat_prop, dict):
-                 category = cat_prop["name"]    # 如果是单选
+                 category = cat_prop["name"]    
         
         # --- C. 清理非法字符 (Sanitize) ---
-        # 防止文件名里出现 / \ : * ? " < > | 这些 Windows/Linux 不允许的字符
         safe_title = re.sub(r'[\\/*?:"<>|]', "", title).strip()
         safe_category = re.sub(r'[\\/*?:"<>|]', "", category).strip()
         
@@ -171,18 +217,15 @@ def sync():
         # --- D. 获取页面内容 (Block Children) ---
         md_content = f"# {title}\n\n"
         
-        # 获取该页面下的所有 Block
         blocks = notion.blocks.children.list(page["id"]).get("results", [])
         for block in blocks:
             md_content += block_to_markdown(block)
             
         # --- E. 保存文件 ---
-        # 1. 自动创建文件夹 (如果不存在)
         save_dir = safe_category
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
             
-        # 2. 写入 Markdown 文件
         file_path = os.path.join(save_dir, f"{safe_title}.md")
         
         with open(file_path, "w", encoding="utf-8") as f:
